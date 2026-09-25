@@ -6,15 +6,20 @@ from datetime import datetime,timezone, timedelta
 import re 
 from html import unescape
 from typing import Any
+from zoneinfo import ZoneInfo
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext, CallNext
+from starlette.responses import PlainTextResponse
 from dotenv import load_dotenv
 
 load_dotenv()
 base_url = os.getenv("CANVAS_BASE_URL")
 access_token = os.getenv("CANVAS_ACCESS_TOKEN")
 poke_api_key = os.getenv("POKE_API_KEY")
+# applied whenever a tool is called without term_prefix, so old semesters stay hidden
+default_term_prefix = os.getenv("DEFAULT_TERM_PREFIX") or None
+local_tz = ZoneInfo(os.getenv("TIMEZONE", "America/New_York"))
 
 if not poke_api_key:
     raise RuntimeError("POKE_API_KEY is required. Set it in your environment to secure this MCP server.")
@@ -69,11 +74,23 @@ def abs_url(url: str | None) -> str | None:
         return base_url + url
     return url
 
+# human readable local time, e.g. "Fri Sep 26, 11:59 PM EDT". utc iso fields are kept for sorting
+def local_str(dt: datetime | str | None) -> str | None:
+    if not dt:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return dt.astimezone(local_tz).strftime("%a %b %d, %I:%M %p %Z")
+
 def fetch_dashboard_cards(term_prefix: str | None = None):
-    url = base_url + "/api/v1/dashboard/dashboard_cards?per_page=100"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    r = httpx.get(url, headers=headers, timeout=90.0)
-    cards = r.json()
+    term_prefix = term_prefix or default_term_prefix
+    r = canvas_get("/api/v1/dashboard/dashboard_cards", {"per_page": 100})
+    if not r["ok"]:
+        return []
+    cards = r["data"]
 
     data = []
     for card in cards:
@@ -117,6 +134,7 @@ def fetch_assignments(course_id: int, days_ahead: int, include_overdue: bool):
                 "id": assignment.get("id"),
                 "name": assignment.get("name"),
                 "due_at": due.isoformat(),
+                "due_local": local_str(due),
                 "is_overdue": is_overdue,
                 "submitted": submitted,
                 "points_possible": assignment.get("points_possible"),
@@ -222,6 +240,7 @@ def get_recent_announcements(days_back: int =7, term_prefix: str | None = None, 
                 "id": topic.get("id"),
                 "title": topic.get("title"),
                 "posted_at": posted.isoformat(),
+                "posted_local": local_str(posted),
                 "author": (topic.get("author") or {}).get("display_name") or topic.get("user_name"),
                 "read_state": topic.get("read_state"),
                 "unread_count": topic.get("unread_count"),
@@ -282,6 +301,7 @@ def get_week_ahead(days_ahead: int = 7, days_back: int = 0, per_page: int = 100)
             "id": item.get("plannable_id"),
             "title": plannable.get("title"),
             "date": dt.isoformat(),
+            "date_local": local_str(dt),
             "new_activity": item.get("new_activity", False),
             "html_url": abs_url(item.get("html_url") or ""),
         }
@@ -379,6 +399,7 @@ def get_recently_graded(days_back: int = 7, term_prefix: str | None = None, max_
             "id": item.get("plannable_id"),
             "title": plannable.get("title"),
             "grade_posted_at": grade_posted_at.isoformat(),
+            "grade_posted_local": local_str(grade_posted_at),
             "html_url": abs_url(item.get("html_url") or ""),
             "submission": {
                 "submitted": subs.get("submitted"),
@@ -458,6 +479,7 @@ def get_today_summary(
             "id": item.get("plannable_id"),
             "title": plannable.get("title"),
             "date": dt.isoformat(),
+            "date_local": local_str(dt),
             "new_activity": item.get("new_activity", False),
             "html_url": abs_url(item.get("html_url") or ""),
         }
@@ -533,6 +555,7 @@ def get_today_summary(
                 "id": topic.get("id"),
                 "title": topic.get("title"),
                 "posted_at": posted.isoformat(),
+                "posted_local": local_str(posted),
                 "author": (topic.get("author") or {}).get("display_name") or topic.get("user_name"),
                 "read_state": topic.get("read_state"),
                 "unread_count": topic.get("unread_count"),
@@ -598,6 +621,7 @@ def get_today_summary(
             "id": item.get("plannable_id"),
             "title": plannable.get("title"),
             "grade_posted_at": grade_posted_at.isoformat(),
+            "grade_posted_local": local_str(grade_posted_at),
             "html_url": abs_url(item.get("html_url") or ""),
             "submission": {
                 "submitted": subs.get("submitted"),
@@ -648,6 +672,7 @@ def get_today_summary(
 
     return {
         "generated_at": now.isoformat(),
+        "now_local": local_str(now),
         "window": {
             "past_hours": past_hours,
             "future_hours": future_hours,
@@ -665,6 +690,78 @@ def get_today_summary(
         "graded": graded,
         "overdue": overdue,
     }
+
+@mcp.tool(description="""
+Use when the user asks: 'What am I missing?' 'What am I behind on?' or 'Did I forget to turn anything in?'
+Returns assignments Canvas marks as missing (past due, not submitted) across current courses, most recent first.
+Unlike get_today_summary's overdue list, this is not limited to the last week.""")
+def get_missing_submissions(term_prefix: str | None = None):
+    courses = fetch_dashboard_cards(term_prefix)
+    allowed_course_ids = {c["id"] for c in courses}
+
+    params = {"per_page": 100, "include[]": "course", "filter[]": "submittable"}
+    r = canvas_get("/api/v1/users/self/missing_submissions", params)
+    if not r["ok"]:
+        return r
+
+    out: list[dict[str, Any]] = []
+    for a in r["data"] or []:
+        course_id = a.get("course_id")
+        if allowed_course_ids and course_id not in allowed_course_ids:
+            continue
+
+        out.append({
+            "type": "missing",
+            "course_id": course_id,
+            "course_name": (a.get("course") or {}).get("name"),
+            "id": a.get("id"),
+            "name": a.get("name"),
+            "due_at": a.get("due_at"),
+            "due_local": local_str(a.get("due_at")),
+            "points_possible": a.get("points_possible"),
+            "html_url": a.get("html_url"),
+        })
+
+    out.sort(key=lambda x: x.get("due_at") or "", reverse=True)
+    return out
+
+@mcp.tool(description="""
+Use when the user asks: 'What are my grades?' 'How am I doing in my classes?' or 'What's my grade in Bio?'
+Returns the current overall score and letter grade (if the course uses one) for each current course.""")
+def get_grades(term_prefix: str | None = None):
+    courses = fetch_dashboard_cards(term_prefix)
+    names = {c["id"]: c["name"] for c in courses}
+
+    params = {"per_page": 100, "enrollment_state": "active", "include[]": "total_scores"}
+    r = canvas_get("/api/v1/courses", params)
+    if not r["ok"]:
+        return r
+
+    out: list[dict[str, Any]] = []
+    for course in r["data"] or []:
+        course_id = course.get("id")
+        if names and course_id not in names:
+            continue
+
+        enrollment = next((e for e in course.get("enrollments") or [] if e.get("type") == "student"), None)
+        if not enrollment:
+            continue
+
+        out.append({
+            "course_id": course_id,
+            "course_name": names.get(course_id) or course.get("name"),
+            "current_score": enrollment.get("computed_current_score"),
+            "current_grade": enrollment.get("computed_current_grade"),
+            "final_score": enrollment.get("computed_final_score"),
+            "final_grade": enrollment.get("computed_final_grade"),
+        })
+
+    return out
+
+# plain http route outside mcp (no api key needed), for uptime pings that keep render's free tier awake
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request):
+    return PlainTextResponse("ok")
 
 @mcp.resource(
     "canvas://terms/prefix",
@@ -698,7 +795,11 @@ def resource_help():
             {"ask_like": ["announcements", "updates", "did my professor post"], "use_tool": "get_recent_announcements"},
             {"ask_like": ["graded", "grades posted", "feedback"], "use_tool": "get_recently_graded"},
             {"ask_like": ["week ahead", "plan my week"], "use_tool": "get_week_ahead"},
+            {"ask_like": ["what am i missing", "behind on", "forgot to submit"], "use_tool": "get_missing_submissions"},
+            {"ask_like": ["my grades", "how am i doing", "grade in"], "use_tool": "get_grades"},
         ],
+        "timezone": str(local_tz),
+        "time_hint": "Prefer the *_local fields when telling the user dates/times.",
         "term_prefix_hint": "If old courses show up, use term_prefix like '26SS' to filter.",
     }
 

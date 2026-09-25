@@ -51,7 +51,13 @@ Server runs on http://localhost:8000/mcp, connect using "Streamable HTTP" Transp
 CANVAS_BASE_URL=https://your_school.instructure.com 
 CANVAS_ACCESS_TOKEN=you_canvas_access_token
 POKE_API_KEY=your_api_key
+
+# optional
+TIMEZONE=America/New_York       # used for the *_local time fields
+DEFAULT_TERM_PREFIX=26FS        # hides courses whose dashboard name doesn't start with this
 ```
+
+`GET /health` returns `ok` without an API key. On Render's free plan, point a free uptime pinger (e.g. cron-job.org) at it every 10 minutes so the service doesn't spin down and time out Poke's first call.
 
 ## Deploying
 
@@ -110,6 +116,14 @@ Example: "Use Canvas MCP connection's get_today_summary tool"
 #### **8. get_course_assignments**
 
 - This tool returns all the upcoming assignments for a specific course with the option to include overdue assignments using course id.
+
+#### **9. get_missing_submissions**
+
+- This tool returns everything Canvas marks as missing across current courses, not just the last week.
+
+#### **10. get_grades**
+
+- This tool returns the current score and letter grade for each current course.
 
 
 ## Problems I faced

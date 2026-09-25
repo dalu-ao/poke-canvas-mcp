@@ -15,3 +15,7 @@ services:
         sync: false
       - key: POKE_API_KEY
         sync: false
+      - key: TIMEZONE
+        value: America/New_York
+      - key: DEFAULT_TERM_PREFIX
+        sync: false
