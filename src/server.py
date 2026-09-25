@@ -23,6 +23,8 @@ poke_api_key = os.getenv("POKE_API_KEY")
 # applied whenever a tool is called without term_prefix, so old semesters stay hidden
 default_term_prefix = os.getenv("DEFAULT_TERM_PREFIX") or None
 local_tz = ZoneInfo(os.getenv("TIMEZONE", "America/New_York"))
+# planner item types that have a due date. sub_assignment = graded discussion checkpoints
+DUE_TYPES = ("assignment", "quiz", "sub_assignment", "discussion_topic")
 
 if not poke_api_key:
     raise RuntimeError("POKE_API_KEY is required. Set it in your environment to secure this MCP server.")
@@ -113,11 +115,14 @@ def fetch_dashboard_cards(term_prefix: str | None = None):
         return []
     cards = r["data"]
 
+    # comma separated, a course is kept if its name contains any of them, e.g. "FA 26-27,202615"
+    filters = [f.strip() for f in (term_prefix or "").split(",") if f.strip()]
+
     data = []
     for card in cards:
         name = card["shortName"]
         id = card["id"]
-        if term_prefix and not name.startswith(term_prefix):
+        if filters and not any(f in name for f in filters):
             continue
         data.append({"id": id, "name": name})
     return data
@@ -336,7 +341,7 @@ def get_week_ahead(days_ahead: int = 7, days_back: int = 0, per_page: int = 100)
                 "has_feedback": subs.get("has_feedback"),
             }
 
-        if pl_type in ("assignment", "quiz"):
+        if pl_type in DUE_TYPES:
             normalized["due_at"] = plannable.get("due_at")
             normalized["points_possible"] = plannable.get("points_possible")
             normalized["assignment_id"] = plannable.get("assignment_id")
@@ -514,7 +519,7 @@ def get_today_summary(
                 "has_feedback": subs.get("has_feedback"),
             }
 
-        if pl_type in ("assignment", "quiz"):
+        if pl_type in DUE_TYPES:
             normalized["due_at"] = plannable.get("due_at")
             normalized["points_possible"] = plannable.get("points_possible")
             normalized["assignment_id"] = plannable.get("assignment_id")
@@ -527,7 +532,7 @@ def get_today_summary(
             events.append(normalized)
             continue
 
-        if pl_type in ("assignment", "quiz"):
+        if pl_type in DUE_TYPES:
             sub = normalized.get("submission")
             if isinstance(sub, dict) and sub.get("submitted") is True:
                 continue
@@ -766,13 +771,14 @@ def get_grades(term_prefix: str | None = None):
         if not enrollment:
             continue
 
+        # final_* counts ungraded work as 0, which reads as an F early in the term, so only current is returned
+        score = enrollment.get("computed_current_score")
         out.append({
             "course_id": course_id,
             "course_name": names.get(course_id) or course.get("name"),
-            "current_score": enrollment.get("computed_current_score"),
+            "current_score": score,
             "current_grade": enrollment.get("computed_current_grade"),
-            "final_score": enrollment.get("computed_final_score"),
-            "final_grade": enrollment.get("computed_final_grade"),
+            "note": None if score is not None else "No graded work yet",
         })
 
     return out
