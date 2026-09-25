@@ -24,6 +24,16 @@ What is [Poke](https://poke.com/)? - AI assistant that I use day to day for mana
 3. Scroll to Approved Integrations 
 4. Create New Access Token (copy the token as you won't see it again)
 
+## If your school blocks access tokens
+
+Leave `CANVAS_ACCESS_TOKEN` empty and set `CANVAS_COOKIE` instead:
+
+1. Log into Canvas in your browser and open Developer Tools → Network
+2. Refresh, click any request to your Canvas domain, and copy the full `Cookie` request header value
+3. Paste it as `CANVAS_COOKIE`
+
+The session expires eventually; when it does, tools return a "session cookie expired" error and you repeat the steps above.
+
 ## Quick Start
 
 ```bash 

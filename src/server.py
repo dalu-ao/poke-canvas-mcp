@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import json
 import secrets
 import httpx
 from datetime import datetime,timezone, timedelta
@@ -16,6 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 base_url = os.getenv("CANVAS_BASE_URL")
 access_token = os.getenv("CANVAS_ACCESS_TOKEN")
+# alternative to a token when the school blocks student tokens: the full Cookie header copied from a logged in browser
+canvas_cookie = os.getenv("CANVAS_COOKIE")
 poke_api_key = os.getenv("POKE_API_KEY")
 # applied whenever a tool is called without term_prefix, so old semesters stay hidden
 default_term_prefix = os.getenv("DEFAULT_TERM_PREFIX") or None
@@ -45,10 +48,23 @@ class ApiKeyMiddleware(Middleware):
 
 mcp = FastMCP("poke-canvas-mcp", middleware=[ApiKeyMiddleware(poke_api_key)])
 
+def canvas_headers() -> dict:
+    if access_token:
+        return {"Authorization": f"Bearer {access_token}"}
+    return {"Cookie": canvas_cookie or "", "Accept": "application/json"}
+
 def canvas_get(path : str, params : dict | None = None):
     url = base_url + path
-    headers = {"Authorization" : f"Bearer {access_token}"}
-    r = httpx.get(url, headers=headers, params=params, timeout=90.0)
+    r = httpx.get(url, headers=canvas_headers(), params=params, timeout=90.0)
+
+    # an expired session cookie either 401s or redirects to the login page
+    if r.status_code in (401, 302, 303) and not access_token:
+        return {
+            "ok": False,
+            "status": r.status_code,
+            "error": "Canvas session cookie expired. Log into Canvas in a browser, copy a fresh Cookie header, and update CANVAS_COOKIE.",
+            "url": str(r.url)
+        }
 
     if r.status_code >= 400:
         return{
@@ -57,7 +73,12 @@ def canvas_get(path : str, params : dict | None = None):
             "error": r.text,
             "url": str(r.url)
         }
-    return {"ok": True, "data":r.json()}
+
+    # canvas prefixes json with while(1); for cookie authenticated api requests
+    text = r.text
+    if text.startswith("while(1);"):
+        text = text[len("while(1);"):]
+    return {"ok": True, "data": json.loads(text)}
 
 # the response from announcements endpoint has weird html characters, this helper converts to text and cleans it
 def strip_html(html: str) -> str:
@@ -149,10 +170,8 @@ Use when the user asks: 'What classes am I enrolled in?' or 'Show all my courses
 Returns Canvas course objects for all enrolled/active courses (raw Canvas response). 
 Best for troubleshooting or listing everything.""")
 def list_courses_raw(_=None):
-    url = base_url+"/api/v1/courses?per_page=100"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    r = httpx.get(url, headers=headers, timeout=90.0)
-    return r.json();
+    r = canvas_get("/api/v1/courses", {"per_page": 100})
+    return r["data"] if r["ok"] else r
 
 @mcp.tool(description="""
 Use when the user asks: 'What are my current classes this term?' or 'Show my dashboard classes'.
